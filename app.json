@@ -18,6 +18,9 @@
         {
           "android": {
             "minSdkVersion": 29
+          },
+          "ios": {
+            "deploymentTarget": "15.1"
           }
         }
       ]

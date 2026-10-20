@@ -52,6 +52,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY="" \
+            IPHONEOS_DEPLOYMENT_TARGET=15.1 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
             archive
 
       - name: Package IPA
