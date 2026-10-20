@@ -8,6 +8,12 @@
     "plugins": [
       ["pear-runtime-react-native"],
       [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {

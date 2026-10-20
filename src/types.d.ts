@@ -1,5 +1,5 @@
 declare module 'b4a' {
-  export function toString(data: Uint8Array): string
+  export function toString(data: Uint8Array, encoding?: string): string
 }
 
 declare module 'framed-stream' {
@@ -10,4 +10,9 @@ declare module 'framed-stream' {
     write(data: string): void
     destroy(): void
   }
+}
+
+declare module '*.wav' {
+  const asset: number
+  export default asset
 }

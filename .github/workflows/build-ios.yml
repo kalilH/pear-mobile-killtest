@@ -1,0 +1,60 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Bundle Bare worklet
+        run: npm run bundle:bare
+
+      - name: Prebuild iOS project
+        run: npx expo prebuild --platform ios
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build Xcode Archive (Unsigned)
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace HelloPear.xcworkspace \
+            -scheme HelloPear \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/HelloPear.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_IDENTITY="" \
+            archive
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r ios/build/HelloPear.xcarchive/Products/Applications/HelloPear.app Payload/
+          zip -r -q HelloPear.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloPear-iOS
+          path: HelloPear.ipa
+          retention-days: 7

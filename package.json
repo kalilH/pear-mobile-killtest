@@ -17,7 +17,10 @@
     "lint": "lunte",
     "format": "prettier . --write",
     "test": "prettier . --check && lunte",
-    "check:upgrade": "node scripts/check-upgrade.js"
+    "check:upgrade": "node scripts/check-upgrade.js",
+    "killtest:android": "npm run bundle:bare && expo run:android --variant release --device",
+    "killtest:ios": "npm run bundle:bare && expo run:ios --configuration Release --device",
+    "gen:audio": "node scripts/gen-keepalive-audio.js"
   },
   "repository": {
     "type": "git",
@@ -32,13 +35,18 @@
   "dependencies": {
     "b4a": "^1.8.0",
     "expo": "^55.0.8",
+    "expo-audio": "~55.0.18",
     "expo-build-properties": "~55.0.10",
+    "expo-clipboard": "~55.0.17",
+    "expo-keep-awake": "~55.0.8",
     "expo-linear-gradient": "~55.0.15",
     "expo-modules-core": "^55.0.17",
     "expo-status-bar": "~55.0.4",
     "expo-system-ui": "~55.0.10",
     "framed-stream": "^1.0.1",
     "hello-pear-worker": "^1.1.0",
+    "hypercore-crypto": "^3.7.0",
+    "hyperswarm": "^4.17.2",
     "pear-mobile": "^4.3.0",
     "pear-runtime-react-native": "^3.0.1",
     "react": "19.2.0",
@@ -56,6 +64,10 @@
     "prettier": "^3.8.1",
     "prettier-config-holepunch": "^2.0.0",
     "typescript": "~5.9.2"
+  },
+  "overrides": {
+    "bare-module-lexer": "1.6.5",
+    "expo-asset": "~55.0.19"
   },
   "private": true
 }
