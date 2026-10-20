@@ -7,10 +7,15 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Select Xcode 16.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          xcodebuild -version
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,12 +40,15 @@ jobs:
       - name: Build Xcode Archive (Unsigned)
         run: |
           cd ios
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" -json | jq -r '.workspace.schemes[0]')
+          echo "Building workspace: $WORKSPACE with scheme: $SCHEME"
           xcodebuild \
-            -workspace HelloPear.xcworkspace \
-            -scheme HelloPear \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath build/HelloPear.xcarchive \
+            -archivePath build/App.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY="" \
@@ -48,8 +56,10 @@ jobs:
 
       - name: Package IPA
         run: |
+          APP_PATH=$(find ios/build/App.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -n 1)
+          echo "Packaging app: $APP_PATH"
           mkdir -p Payload
-          cp -r ios/build/HelloPear.xcarchive/Products/Applications/HelloPear.app Payload/
+          cp -r "$APP_PATH" Payload/
           zip -r -q HelloPear.ipa Payload
 
       - name: Upload IPA Artifact
