@@ -26,6 +26,25 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Patch expo-modules-core Swift 5 compatibility
+        run: |
+          node -e '
+            const fs = require("fs");
+            const files = [
+              "node_modules/expo-modules-core/ios/Core/Views/SwiftUI/SwiftUIHostingView.swift",
+              "node_modules/expo-modules-core/ios/Core/Views/SwiftUI/SwiftUIVirtualView.swift",
+              "node_modules/expo-modules-core/ios/Core/Views/ViewDefinition.swift"
+            ];
+            for (const f of files) {
+              if (fs.existsSync(f)) {
+                let content = fs.readFileSync(f, "utf8");
+                content = content.replace(/@MainActor\s+(AnyExpoSwiftUIHostingView|ExpoSwiftUI\.ViewWrapper|AnyArgument)/g, "$1");
+                fs.writeFileSync(f, content);
+                console.log("Patched", f);
+              }
+            }
+          '
+
       - name: Bundle Bare worklet
         run: npm run bundle:bare
 
@@ -72,6 +91,7 @@ jobs:
             CODE_SIGNING_IDENTITY="" \
             IPHONEOS_DEPLOYMENT_TARGET=15.1 \
             SWIFT_STRICT_CONCURRENCY=minimal \
+            SWIFT_VERSION=5.0 \
             archive
 
       - name: Package IPA
