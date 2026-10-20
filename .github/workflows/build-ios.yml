@@ -32,6 +32,24 @@ jobs:
       - name: Prebuild iOS project
         run: npx expo prebuild --platform ios
 
+      - name: Patch Podfile for Swift 5 and iOS 15.1
+        run: |
+          node -e '
+            const fs = require("fs");
+            let p = fs.readFileSync("ios/Podfile", "utf8");
+            const patch = `
+                installer.pods_project.targets.each do |target|
+                  target.build_configurations.each do |config|
+                    config.build_settings["SWIFT_VERSION"] = "5.0"
+                    config.build_settings["SWIFT_STRICT_CONCURRENCY"] = "minimal"
+                    config.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "15.1"
+                  end
+                end
+            `;
+            p = p.replace(/post_install do \|installer\|/, "post_install do |installer|\n" + patch);
+            fs.writeFileSync("ios/Podfile", p);
+          '
+
       - name: Install CocoaPods
         run: |
           cd ios
