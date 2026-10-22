@@ -25,7 +25,6 @@ import {
 import { Worklet } from 'react-native-bare-kit'
 import * as Clipboard from 'expo-clipboard'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
-import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio'
 import FramedStream from 'framed-stream'
 import b4a from 'b4a'
 import bundle from './worker.bundle.js'
@@ -80,19 +79,23 @@ let logSeq = 0
 export default function App() {
   const workletRef = useRef<Worklet | null>(null)
   const pipeRef = useRef<FramedStream | null>(null)
-  const playerRef = useRef<AudioPlayer | null>(null)
   const lastTelemetryAt = useRef(0)
 
   const [booted, setBooted] = useState(false)
   const [topic, setTopic] = useState('')
+  const [directKey, setDirectKey] = useState('')
   const [joinKey, setJoinKey] = useState('')
   const [telemetry, setTelemetry] = useState<Telemetry>({ mode: null, state: 'Idle' })
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [audioOn, setAudioOn] = useState(false)
-  const [bypassSuspend, setBypassSuspend] = useState(false)
+  const [autoKeepAwake, setAutoKeepAwake] = useState(true)
+  const [bypassSuspend, setBypassSuspend] = useState(true)
   const [keepAwake, setKeepAwake] = useState(false)
   const [speedMode, setSpeedMode] = useState<SpeedMode>('max')
   const [now, setNow] = useState(Date.now())
+
+  const telemetryRef = useRef(telemetry)
+  telemetryRef.current = telemetry
+  const bgSnapshotRef = useRef<{ time: number; bytes: number } | null>(null)
 
   const bypassRef = useRef(bypassSuspend)
   bypassRef.current = bypassSuspend
@@ -130,6 +133,7 @@ export default function App() {
         addLog('P2P', msg.msg, msg.t)
       } else if (msg.type === 'topic') {
         setTopic(msg.topic)
+        if (msg.directKey) setDirectKey(msg.directKey)
       } else if (msg.type === 'ready') {
         setBooted(true)
       } else if (msg.type === 'error') {
@@ -149,7 +153,7 @@ export default function App() {
   }, [addLog])
 
   // -------------------------------------------------------------------------
-  // AppState: log transitions and optionally undo BareKit's auto-suspend
+  // AppState: log transitions, track background transfer, and undo BareKit auto-suspend
 
   useEffect(() => {
     // react-native-bare-kit registers its own AppState listener at import time
@@ -157,7 +161,31 @@ export default function App() {
     // later, so it runs after theirs and can resume the worklet again.
     const sub = AppState.addEventListener('change', (state) => {
       const w = workletRef.current as (Worklet & WorkletState) | null
-      addLog('UI', `AppState -> ${state}${w?.suspended ? ' (worklet suspended)' : ''}`)
+      if (state === 'background') {
+        bgSnapshotRef.current = {
+          time: Date.now(),
+          bytes: telemetryRef.current.bytes ?? 0
+        }
+        addLog(
+          'UI',
+          `AppState -> background (worklet active: ${!w?.suspended}, bypass: ${bypassRef.current})`
+        )
+      } else if (state === 'active') {
+        if (bgSnapshotRef.current) {
+          const elapsedSec = (Date.now() - bgSnapshotRef.current.time) / 1000
+          const bytesSent = (telemetryRef.current.bytes ?? 0) - bgSnapshotRef.current.bytes
+          const mb = (bytesSent / (1024 * 1024)).toFixed(1)
+          const rate = elapsedSec > 0 ? (bytesSent / (1024 * 1024) / elapsedSec).toFixed(1) : '0'
+          if (bytesSent > 0) {
+            addLog('UI', `AppState -> active (+${mb} MB in background @ ${rate} MB/s)`)
+          } else {
+            addLog('UI', `AppState -> active (${elapsedSec.toFixed(0)}s in background)`)
+          }
+          bgSnapshotRef.current = null
+        } else {
+          addLog('UI', 'AppState -> active')
+        }
+      }
       if (w && bypassRef.current && w.suspended && !w.terminated) {
         w.resume()
         addLog('UI', 'Worklet resumed (bypass auto-suspend)')
@@ -184,51 +212,21 @@ export default function App() {
   }, [])
 
   // -------------------------------------------------------------------------
-  // Background audio keep-alive
+  // Smart Screen Keep-Awake during Active Transfers
 
-  const toggleAudio = useCallback(
-    async (on: boolean) => {
-      setAudioOn(on)
-      try {
-        if (on) {
-          await setAudioModeAsync({
-            playsInSilentMode: true,
-            shouldPlayInBackground: true,
-            // Android sustained background playback needs lock-screen controls,
-            // which require doNotMix. iOS can mix so other audio still works.
-            interruptionMode: Platform.OS === 'android' ? 'doNotMix' : 'mixWithOthers'
-          })
-          if (!playerRef.current) {
-            playerRef.current = createAudioPlayer(require('../assets/keepalive.wav'))
-          }
-          const p = playerRef.current
-          p.loop = true
-          p.volume = 1
-          if (Platform.OS === 'android') {
-            // Starts the media-playback foreground service (config plugin).
-            p.setActiveForLockScreen(true, {
-              title: 'P2P Kill-Test',
-              artist: 'Background keep-alive'
-            })
-          }
-          p.play()
-          addLog('UI', 'Background audio keep-alive ON')
-        } else {
-          const p = playerRef.current
-          if (p) {
-            p.pause()
-            if (Platform.OS === 'android') p.setActiveForLockScreen(false)
-          }
-          await setAudioModeAsync({ shouldPlayInBackground: false })
-          addLog('UI', 'Background audio keep-alive OFF')
-        }
-      } catch (err: any) {
-        setAudioOn(false)
-        addLog('UI', `Audio error: ${err?.message ?? String(err)}`)
-      }
-    },
-    [addLog]
-  )
+  const isTransferring =
+    telemetry.mode !== null &&
+    (telemetry.state === 'Streaming' ||
+      telemetry.state === 'Connecting' ||
+      telemetry.state === 'Ready')
+
+  useEffect(() => {
+    if (autoKeepAwake && isTransferring) {
+      activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {})
+    } else if (!keepAwake) {
+      deactivateKeepAwake(KEEP_AWAKE_TAG)
+    }
+  }, [autoKeepAwake, isTransferring, keepAwake])
 
   const toggleKeepAwake = useCallback(
     async (on: boolean) => {
@@ -236,7 +234,7 @@ export default function App() {
       try {
         if (on) await activateKeepAwakeAsync(KEEP_AWAKE_TAG)
         else deactivateKeepAwake(KEEP_AWAKE_TAG)
-        addLog('UI', `Screen keep-awake ${on ? 'ON' : 'OFF'}`)
+        addLog('UI', `Force screen keep-awake ${on ? 'ON' : 'OFF'}`)
       } catch (err: any) {
         addLog('UI', `Keep-awake error: ${err?.message ?? String(err)}`)
       }
@@ -267,13 +265,14 @@ export default function App() {
 
   const startHost = () => {
     setTopic('')
+    setDirectKey('')
     send({ type: 'host', speedMode })
   }
 
   const startJoin = (key?: string) => {
     const k = (key ?? joinKey).trim().toLowerCase()
-    if (!/^[0-9a-f]{64}$/.test(k)) {
-      addLog('UI', 'Key must be 64 hex characters')
+    if (!/^[0-9a-f]{64}(@[^\s]+)?$/.test(k)) {
+      addLog('UI', 'Key must be 64 hex characters (optional @ip:port)')
       return
     }
     setJoinKey(k)
@@ -283,7 +282,7 @@ export default function App() {
 
   const pasteAndConnect = async () => {
     const text = (await Clipboard.getStringAsync()).trim()
-    const match = text.match(/[0-9a-fA-F]{64}/)
+    const match = text.match(/[0-9a-fA-F]{64}(@[^\s]+)?/)
     if (!match) {
       addLog('UI', 'Clipboard has no 64-char hex key')
       return
@@ -294,6 +293,7 @@ export default function App() {
   const stop = () => {
     send({ type: 'stop' })
     setTopic('')
+    setDirectKey('')
   }
 
   const copyKey = async () => {
@@ -404,26 +404,47 @@ export default function App() {
               <Btn label='Share Key' onPress={shareKey} disabled={!topic} flex />
               <Btn label='Stop' onPress={stop} danger flex />
             </View>
+            {directKey ? (
+              <View
+                style={{
+                  marginTop: 12,
+                  paddingTop: 10,
+                  borderTopWidth: 1,
+                  borderTopColor: '#334155'
+                }}
+              >
+                <Text style={styles.label}>DIRECT HOTSPOT / LAN KEY (0-INTERNET)</Text>
+                <Text selectable style={[styles.key, { color: '#4ade80' }]}>
+                  {directKey}
+                </Text>
+                <View style={[styles.row, { marginTop: 6 }]}>
+                  <Btn
+                    label='Copy Hotspot Key'
+                    onPress={async () => {
+                      await Clipboard.setStringAsync(directKey)
+                      addLog('UI', 'Direct Hotspot key copied')
+                    }}
+                    flex
+                  />
+                </View>
+              </View>
+            ) : null}
           </View>
         )}
 
-        {/* Survival toggles */}
+        {/* Persistence & Screen Toggles */}
         <View style={styles.card}>
           <Toggle
-            label='Enable Background Audio Keep-Alive'
-            value={audioOn}
-            onChange={toggleAudio}
+            label='Auto-prevent screen sleep during transfer'
+            value={autoKeepAwake}
+            onChange={setAutoKeepAwake}
           />
           <Toggle
             label='Bypass BareKit auto-suspend on background'
             value={bypassSuspend}
             onChange={toggleBypass}
           />
-          <Toggle
-            label='Keep screen awake (foreground wake-lock)'
-            value={keepAwake}
-            onChange={toggleKeepAwake}
-          />
+          <Toggle label='Force screen awake always' value={keepAwake} onChange={toggleKeepAwake} />
         </View>
 
         {/* Dashboard */}

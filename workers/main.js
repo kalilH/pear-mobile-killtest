@@ -21,8 +21,56 @@ const Hyperswarm = require('hyperswarm')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const FramedStream = require('framed-stream')
+const UDX = require('udx-native')
+const udx = new UDX()
+let udxBinding = null
+try {
+  udxBinding = require('udx-native/binding')
+} catch {}
 
-const CHUNK_SIZE = 64 * 1024
+// Global crash guard for BareKit worklet
+if (typeof Bare !== 'undefined' && Bare.on) {
+  Bare.on('uncaughtException', (err) => {
+    try {
+      log(`FATAL UNCAUGHT: ${err && err.stack ? err.stack : err}`)
+    } catch {}
+  })
+}
+
+// Accelerated hole-punching for 5G Cellular / Symmetric CGNAT (Scenario B)
+const Holepuncher = require('hyperdht/lib/holepuncher')
+if (Holepuncher && Holepuncher.prototype) {
+  Holepuncher.prototype._randomProbes = async function (remoteAddr) {
+    let tries = 1750
+    const HOLEPUNCH = b4a.from([0])
+    while (this.punching && tries > 0) {
+      const burst = Math.min(3, tries)
+      tries -= burst
+      for (let i = 0; i < burst; i++) {
+        const port = (1000 + Math.random() * 64536) | 0
+        try {
+          this._holder.socket.send(HOLEPUNCH, port, remoteAddr.host, 64)
+        } catch {}
+      }
+      if (this.punching) await this._sleeper.pause(8)
+    }
+    this._autoDestroy()
+  }
+
+  const origReopen = Holepuncher.prototype._reopen
+  Holepuncher.prototype._reopen = function () {
+    if (this.remoteFirewall >= 3) return Promise.resolve(false) // FIREWALL.RANDOM = 3, bypass useless 12s reopen delays
+    return origReopen.call(this)
+  }
+}
+
+const CHUNK_SIZE = 256 * 1024
+const DISCOVERY_PORT = 49739
+const BOOTSTRAP_NODES = [
+  { host: '88.99.3.86', port: 49737 },
+  { host: '142.93.90.113', port: 49737 },
+  { host: '138.68.147.8', port: 49737 }
+]
 const SPEED_RATES = {
   '256k': 256 * 1024,
   '2m': 2 * 1024 * 1024,
@@ -39,6 +87,7 @@ const HEADER_SIZE = 1 + 8 + 4
 const T_CHUNK = 0x01
 const T_PING = 0x02
 const T_PONG = 0x03
+const T_LAN_HINT = 0x04
 
 const IPC = (typeof BareKit !== 'undefined' && BareKit.IPC) || Bare.IPC
 const pipe = new FramedStream(IPC)
@@ -101,21 +150,57 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Session
 
+function tuneSocket(socket) {
+  const HWM = 2 * 1024 * 1024
+  if (socket._writableState) socket._writableState.highWaterMark = HWM
+  if (socket._readableState) socket._readableState.highWaterMark = HWM
+  const raw = socket.rawStream
+  if (raw) {
+    if (raw._writableState) raw._writableState.highWaterMark = HWM
+    if (raw._readableState) raw._readableState.highWaterMark = HWM
+    if (raw.socket) {
+      try {
+        raw.socket.setSendBufferSize(8 * 1024 * 1024)
+        raw.socket.setRecvBufferSize(8 * 1024 * 1024)
+      } catch {}
+    }
+  }
+}
+
 async function start(mode, topicHex, speedMode = 'max') {
   if (session) await stop()
 
   let topic = null
+  let directHint = null
+  const swarm = new Hyperswarm({
+    bootstrap: BOOTSTRAP_NODES,
+    backoffs: [150, 300, 600, 1200],
+    jitter: 50,
+    maxParallel: 5
+  })
+
   if (mode === 'host') {
-    topic = crypto.randomBytes(32)
+    topic = swarm.keyPair.publicKey
   } else {
-    const hex = String(topicHex || '')
+    let cleanHex = String(topicHex || '')
       .trim()
       .toLowerCase()
-    if (!/^[0-9a-f]{64}$/.test(hex)) {
-      send({ type: 'error', msg: 'Topic key must be 64 hex characters' })
+    if (cleanHex.includes('@')) {
+      const parts = cleanHex.split('@')
+      cleanHex = parts[0]
+      const hp = parts[1].split(':')
+      if (hp[0] && hp[1]) {
+        directHint = { host: hp[0], port: parseInt(hp[1], 10) }
+      }
+    }
+    if (!/^[0-9a-f]{64}$/.test(cleanHex)) {
+      send({ type: 'error', msg: 'Topic key must be 64 hex characters (optional @ip:port)' })
+      try {
+        await swarm.destroy()
+      } catch {}
       return
     }
-    topic = b4a.from(hex, 'hex')
+    topic = b4a.from(cleanHex, 'hex')
   }
 
   const s = {
@@ -126,10 +211,12 @@ async function start(mode, topicHex, speedMode = 'max') {
     streamTimer: null,
     topic,
     topicHex: b4a.toString(topic, 'hex'),
-    swarm: new Hyperswarm(),
+    swarm,
     discovery: null,
     socket: null,
     remote: null,
+    beaconSocket: null,
+    beaconTimer: null,
     startedAt: Date.now(),
     firstConnectAt: 0,
     connectedAt: 0,
@@ -147,6 +234,7 @@ async function start(mode, topicHex, speedMode = 'max') {
     winBytes: 0,
     winStart: Date.now(),
     throughput: 0,
+    lastWireBytes: 0,
     targetReached: false,
     timers: []
   }
@@ -169,6 +257,146 @@ async function start(mode, topicHex, speedMode = 'max') {
     s.punching = punching
   })
 
+  // Local UDP Subnet Beacon for instant zero-internet & auto-switching
+  let beaconSock = null
+  try {
+    beaconSock = udx.createSocket({ reuseAddress: true })
+    beaconSock.on('error', (err) => log(`Beacon socket notice: ${err.message}`))
+    beaconSock.bind(DISCOVERY_PORT)
+    s.beaconSocket = beaconSock
+  } catch (err) {
+    log(`Beacon bind notice: ${err.message}`)
+  }
+
+  function getSubnetTargets() {
+    const targets = new Set(['255.255.255.255', '224.0.0.1'])
+    try {
+      const ifaces = udx.networkInterfaces()
+      for (const iface of ifaces) {
+        if (iface.family === 4 && !iface.internal && iface.host) {
+          const parts = iface.host.split('.')
+          if (parts.length === 4) {
+            targets.add(`${parts[0]}.${parts[1]}.${parts[2]}.255`)
+          }
+        }
+      }
+    } catch {}
+    return Array.from(targets)
+  }
+
+  function broadcastBeacon() {
+    if (session !== s || !beaconSock) return
+    const targets = getSubnetTargets()
+    let payload = null
+    if (s.mode === 'host') {
+      const port = s.swarm.dht.io?.serverSocket?.address()?.port || 49737
+      payload = b4a.from(JSON.stringify({ pv: '1', role: 'host', k: s.topicHex, p: port }))
+    } else {
+      payload = b4a.from(JSON.stringify({ pv: '1', role: 'client', k: s.topicHex }))
+    }
+    for (const target of targets) {
+      try {
+        beaconSock.send(payload, DISCOVERY_PORT, target)
+      } catch {}
+    }
+  }
+  s.broadcastBeacon = broadcastBeacon
+
+  if (beaconSock) {
+    beaconSock.on('message', (buf, rinfo) => {
+      if (session !== s) return
+      let data = null
+      try {
+        data = JSON.parse(b4a.toString(buf))
+      } catch {
+        return
+      }
+      if (!data || data.k !== s.topicHex) return
+
+      // If we are Host and receive a discovery ping from a Client on LAN:
+      if (s.mode === 'host' && (data.role === 'client' || !data.role)) {
+        const port = s.swarm.dht.io?.serverSocket?.address()?.port || 49737
+        const reply = b4a.from(JSON.stringify({ pv: '1', role: 'host', k: s.topicHex, p: port }))
+        try {
+          beaconSock.send(reply, DISCOVERY_PORT, rinfo.host)
+        } catch {}
+      }
+
+      // If we are Client and receive a Host announcement on LAN:
+      if (s.mode === 'join' && (data.role === 'host' || data.p) && data.p) {
+        if (!s.socket) {
+          const peerInfo = s.swarm.peers.get(s.topicHex)
+          if (peerInfo) {
+            peerInfo.attempts = 0
+            peerInfo.banned = false
+            peerInfo.tried = false
+          }
+          log(
+            `Auto-switch: Discovered peer on local WLAN at ${rinfo.host}:${data.p}! Connecting...`
+          )
+          s.swarm._handlePeer(
+            {
+              publicKey: s.topic,
+              relayAddresses: [{ host: rinfo.host, port: data.p }]
+            },
+            s.topic
+          )
+        }
+      }
+    })
+  }
+
+  // Periodic beacon: every 1500ms when not connected (pauses when connected)
+  s.beaconTimer = setInterval(() => {
+    if (session !== s) return
+    if (!s.socket) {
+      broadcastBeacon()
+    }
+  }, 1500)
+
+  if (mode === 'host') {
+    s.swarm
+      .listen()
+      .then(() => {
+        if (session !== s) return
+        const addr = s.swarm.dht.io?.serverSocket?.address()
+        const port = addr ? addr.port : 49737
+        let localIp = null
+        try {
+          const ifaces = udx.networkInterfaces()
+          for (const iface of ifaces) {
+            if (iface.family === 4 && !iface.internal) {
+              localIp = iface.host
+              break
+            }
+          }
+        } catch {}
+        const directKey = localIp ? `${s.topicHex}@${localIp}:${port}` : null
+        send({ type: 'topic', topic: s.topicHex, directKey, mode })
+        if (directKey) {
+          log(`Direct Hotspot/LAN Key: ${directKey}`)
+        }
+        broadcastBeacon()
+        log(`Hotspot/WLAN auto-discovery active on port ${DISCOVERY_PORT}`)
+      })
+      .catch(() => {})
+  } else {
+    // Client mode: broadcast immediate discovery request on WLAN
+    broadcastBeacon()
+    if (directHint) {
+      log(
+        `Direct hint provided: ${directHint.host}:${directHint.port}! Initiating direct P2P connection...`
+      )
+      s.swarm._handlePeer(
+        {
+          publicKey: s.topic,
+          relayAddresses: [directHint]
+        },
+        s.topic
+      )
+    }
+  }
+
   log('Bootstrapping DHT...')
   const tDht = Date.now()
   s.swarm.dht
@@ -176,6 +404,12 @@ async function start(mode, topicHex, speedMode = 'max') {
     .then(() => {
       if (session !== s) return
       const d = s.swarm.dht
+      if (d.socket) {
+        try {
+          d.socket.setSendBufferSize(2 * 1024 * 1024)
+          d.socket.setRecvBufferSize(2 * 1024 * 1024)
+        } catch {}
+      }
       log(
         `DHT ready in ${Date.now() - tDht}ms - public ${d.host || '?'}:${d.port || '?'} ` +
           `firewalled=${d.firewalled} randomizedNAT=${d.randomized}`
@@ -204,7 +438,13 @@ async function start(mode, topicHex, speedMode = 'max') {
   s.timers.push(
     setInterval(() => {
       if (session !== s) return
-      if (!s.socket && s.discovery) {
+      // Rapid recovery watchdog: never interrupt active hole-punching
+      if (!s.socket && s.swarm.connecting === 0 && s.discovery) {
+        for (const peerInfo of s.swarm.peers.values()) {
+          peerInfo.attempts = 0
+          peerInfo.banned = false
+          peerInfo.tried = false
+        }
         s.discovery.refresh().catch(() => {})
       }
     }, 3000)
@@ -223,6 +463,16 @@ async function stop() {
     clearInterval(s.streamTimer)
     s.streamTimer = null
   }
+  if (s.beaconTimer) {
+    clearInterval(s.beaconTimer)
+    s.beaconTimer = null
+  }
+  if (s.beaconSocket) {
+    try {
+      s.beaconSocket.close()
+    } catch {}
+    s.beaconSocket = null
+  }
   for (const t of s.timers) clearInterval(t)
   log('Stopping session, destroying swarm...')
   try {
@@ -240,6 +490,7 @@ async function stop() {
 function onConnection(s, socket, info) {
   if (session !== s) return socket.destroy()
 
+  tuneSocket(socket)
   const raw = socket.rawStream
   const remote = {
     host: (raw && raw.remoteHost) || '?',
@@ -250,7 +501,6 @@ function onConnection(s, socket, info) {
   }
 
   if (s.socket) {
-    // Only one peer is measured at a time; keep the first, close extras.
     log(`Extra connection from ${remote.host}:${remote.port} ignored`)
     socket.on('error', () => {})
     return socket.destroy()
@@ -261,43 +511,78 @@ function onConnection(s, socket, info) {
   s.remote = remote
   s.connectedAt = now
   s.lastHeartbeat = now
+  s.needsDrain = false
+  s.winBytes = 0
+  s.winStart = now
   if (!s.firstConnectAt) {
     s.firstConnectAt = now
     log(`First connection ${now - s.startedAt}ms after joining`)
   }
+
   log(
     `CONNECTED ${remote.relayed ? 'via RELAY' : 'direct P2P'} to ${remote.host}:${remote.port} ` +
-      `(peer ${remote.publicKey}..., we are ${remote.client ? 'client' : 'server'})`
+      `(peer ${remote.publicKey}..., role: ${remote.client ? 'client' : 'server'})`
   )
 
   socket.setKeepAlive?.(5000)
 
   s.needsDrain = false
   socket.on('drain', () => {
-    if (s.socket === socket) {
-      s.needsDrain = false
-      if (s.mode === 'host') {
-        pump(s)
-      }
+    s.needsDrain = false
+    if (s.mode === 'host') {
+      if (s.speedMode === 'max') pumpReplenish(s)
+      else pump(s)
     }
   })
   socket.on('data', (data) => onPeerData(s, socket, data))
   socket.on('error', (err) => log(`Socket error: ${err.code || err.message}`))
   socket.on('close', () => {
-    if (s.socket !== socket) return
+    s.socket = null
+
     if (s.streamTimer) {
       clearInterval(s.streamTimer)
       s.streamTimer = null
     }
     const up = ((Date.now() - s.connectedAt) / 1000).toFixed(1)
-    s.socket = null
     s.connectedAt = 0
     s.disconnects++
-    log(`DISCONNECTED after ${up}s (drop #${s.disconnects}) - swarm will retry`)
+    log(`DISCONNECTED after ${up}s (drop #${s.disconnects}) - auto-switch seeking on LAN/WAN`)
+
+    // Reset attempts so Hyperswarm doesn't de-prioritize or lock out the peer
+    for (const peerInfo of s.swarm.peers.values()) {
+      peerInfo.attempts = 0
+      peerInfo.banned = false
+      peerInfo.tried = false
+    }
+
+    // Trigger immediate local subnet discovery ping
+    if (s.broadcastBeacon) s.broadcastBeacon()
+
+    // Refresh DHT in case peer moved to WAN
+    if (s.discovery) s.discovery.refresh().catch(() => {})
+
     telemetry(s)
   })
 
   if (s.mode === 'host') {
+    let localIp = null
+    try {
+      const ifaces = udx.networkInterfaces()
+      for (const iface of ifaces) {
+        if (iface.family === 4 && !iface.internal && iface.host) {
+          localIp = iface.host
+          break
+        }
+      }
+    } catch {}
+    if (localIp) {
+      const boundPort = s.swarm.dht.io?.serverSocket?.address()?.port || 49737
+      const payloadStr = JSON.stringify({ ips: [localIp], port: boundPort })
+      const payloadBuf = b4a.from(payloadStr)
+      const hintFrame = frame(T_LAN_HINT, Date.now(), 0, payloadBuf.byteLength)
+      hintFrame.set(payloadBuf, HEADER_SIZE)
+      socket.write(hintFrame)
+    }
     applySpeedMode(s)
   }
 
@@ -317,7 +602,7 @@ function onPeerData(s, socket, data) {
     s.winBytes += payload
     s.chunks++
     if (s.lastSeq >= 0 && seq > s.lastSeq + 1) s.gaps += seq - s.lastSeq - 1
-    s.lastSeq = seq
+    s.lastSeq = Math.max(s.lastSeq, seq)
     s.lastHeartbeat = Date.now()
     if (!s.targetReached && s.bytes >= TARGET_BYTES) {
       s.targetReached = true
@@ -329,6 +614,40 @@ function onPeerData(s, socket, data) {
   } else if (type === T_PONG) {
     s.lastHeartbeat = Date.now()
     s.rttMs = Date.now() - ts
+  } else if (type === T_LAN_HINT) {
+    if (
+      s.mode === 'join' &&
+      !s.remote?.host?.startsWith('192.168.') &&
+      !s.remote?.host?.startsWith('10.')
+    ) {
+      try {
+        const payloadBuf = data.subarray(HEADER_SIZE)
+        const hint = JSON.parse(b4a.toString(payloadBuf))
+        if (hint && Array.isArray(hint.ips) && hint.port) {
+          let localIps = []
+          try {
+            const ifaces = udx.networkInterfaces()
+            localIps = ifaces
+              .filter((i) => i.family === 4 && !i.internal && i.host)
+              .map((i) => i.host)
+          } catch {}
+          for (const ip of hint.ips) {
+            const subnet = ip.split('.').slice(0, 3).join('.')
+            const localMatch = localIps.some((l) => l.startsWith(subnet))
+            if (localMatch) {
+              log(
+                `Auto-Upgrade: Same Wi-Fi detected! Migrating connection to LAN IP ${ip}:${hint.port}...`
+              )
+              s.swarm._handlePeer(
+                { publicKey: s.topic, relayAddresses: [{ host: ip, port: hint.port }] },
+                s.topic
+              )
+              break
+            }
+          }
+        }
+      } catch {}
+    }
   }
 }
 
@@ -341,7 +660,33 @@ function frame(type, ts, seq, payloadSize) {
   return buf
 }
 
-let chunkTemplate = null
+// Pre-allocated chunk buffer pool with in-place zero-copy SecretStream support
+const POOL_SIZE = 8
+const chunkPool = []
+const template = crypto.randomBytes(CHUNK_SIZE - HEADER_SIZE)
+for (let i = 0; i < POOL_SIZE; i++) {
+  const buf = b4a.alloc(CHUNK_SIZE)
+  buf[0] = T_CHUNK
+  buf.set(template, HEADER_SIZE)
+  chunkPool.push(buf)
+}
+let poolIndex = 0
+
+function getNextChunk(s, socket) {
+  let buf = null
+  if (socket && typeof socket.alloc === 'function') {
+    // Zero-copy in-place fast path: eliminates 100% of buffer reallocations in SecretStream
+    buf = socket.alloc(CHUNK_SIZE)
+  } else {
+    buf = chunkPool[poolIndex++ % POOL_SIZE]
+  }
+  buf[0] = T_CHUNK
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  view.setFloat64(1, Date.now())
+  view.setUint32(9, s.seq++)
+  buf.set(template, HEADER_SIZE)
+  return buf
+}
 
 function setSpeed(speedMode) {
   const s = session
@@ -355,6 +700,8 @@ function setSpeed(speedMode) {
   telemetry(s)
 }
 
+const HWM_BYTES = 2 * 1024 * 1024
+
 function applySpeedMode(s) {
   if (s.mode !== 'host') return
   if (s.streamTimer) {
@@ -365,49 +712,50 @@ function applySpeedMode(s) {
 
   s.rateStart = 0
   s.rateBytes = 0
+  s.needsDrain = false
   log(`Throughput profile set to: ${s.speedMode.toUpperCase()}`)
 
   if (s.speedMode === 'max') {
-    pump(s)
+    s.streamTimer = setInterval(() => pumpReplenish(s), 4)
+    pumpReplenish(s)
   } else {
-    s.streamTimer = setInterval(() => pump(s), 25)
+    s.streamTimer = setInterval(() => pump(s), 10)
     pump(s)
   }
+}
+
+function pumpReplenish(s) {
+  const socket = s.socket
+  if (!socket || s.targetReached || s.pumping) return
+  s.pumping = true
+  const payload = CHUNK_SIZE - HEADER_SIZE
+
+  while (
+    !s.targetReached &&
+    (!socket._writableState || socket._writableState.buffered < HWM_BYTES)
+  ) {
+    const buf = getNextChunk(s, socket)
+    s.bytes += payload
+    s.winBytes += payload
+    s.chunks++
+
+    if (s.bytes >= TARGET_BYTES) {
+      s.targetReached = true
+      log('500 MB target sent - heartbeats continue')
+      socket.write(buf)
+      break
+    }
+    if (socket.write(buf) === false) {
+      break
+    }
+  }
+  s.pumping = false
 }
 
 function pump(s) {
   const socket = s.socket
   if (!socket || s.targetReached || s.needsDrain) return
-  if (!chunkTemplate) chunkTemplate = crypto.randomBytes(CHUNK_SIZE - HEADER_SIZE)
   const payload = CHUNK_SIZE - HEADER_SIZE
-
-  if (s.speedMode === 'max') {
-    let batch = 0
-    const MAX_BATCH = 16
-    while (!s.targetReached && !s.needsDrain && batch < MAX_BATCH) {
-      const buf = frame(T_CHUNK, Date.now(), s.seq++, payload)
-      buf.set(chunkTemplate, HEADER_SIZE)
-      s.bytes += payload
-      s.winBytes += payload
-      s.chunks++
-      batch++
-      if (s.bytes >= TARGET_BYTES) {
-        s.targetReached = true
-        log('500 MB target sent - heartbeats continue')
-        break
-      }
-      if (socket.write(buf) === false) {
-        s.needsDrain = true
-        break
-      }
-    }
-    if (!s.targetReached && !s.needsDrain && s.speedMode === 'max') {
-      setTimeout(() => {
-        if (session === s && s.speedMode === 'max') pump(s)
-      }, 0)
-    }
-    return
-  }
 
   // Rate-limited governor for selectable speeds
   const targetBps = SPEED_RATES[s.speedMode] || SPEED_RATES['256k']
@@ -420,8 +768,7 @@ function pump(s) {
   const allowedBytes = elapsedSec * targetBps
 
   while (s.rateBytes < allowedBytes && !s.targetReached && !s.needsDrain) {
-    const buf = frame(T_CHUNK, now, s.seq++, payload)
-    buf.set(chunkTemplate, HEADER_SIZE)
+    const buf = getNextChunk(s, socket)
     s.bytes += payload
     s.winBytes += payload
     s.rateBytes += payload
@@ -429,6 +776,7 @@ function pump(s) {
     if (s.bytes >= TARGET_BYTES) {
       s.targetReached = true
       log('500 MB target sent - heartbeats continue')
+      socket.write(buf)
       break
     }
     if (socket.write(buf) === false) {
@@ -457,7 +805,13 @@ function telemetry(s) {
 
   const winMs = now - s.winStart
   if (winMs >= 1000) {
-    s.throughput = (s.winBytes * 1000) / winMs
+    const raw = s.socket?.rawStream
+    const currentWire =
+      s.mode === 'host' ? raw?.bytesTransmitted || s.bytes : raw?.bytesReceived || s.bytes
+    const wireDelta = s.lastWireBytes > 0 ? Math.max(0, currentWire - s.lastWireBytes) : 0
+    s.lastWireBytes = currentWire
+
+    s.throughput = wireDelta > 0 ? (wireDelta * 1000) / winMs : (s.winBytes * 1000) / winMs
     s.winBytes = 0
     s.winStart = now
   }
@@ -495,7 +849,7 @@ function telemetry(s) {
     chunks: s.chunks,
     dropped: s.dropped,
     gaps: s.gaps,
-    rttMs: s.rttMs,
+    rttMs: (s.socket && s.socket.rawStream && s.socket.rawStream.rtt) || s.rttMs,
     lastHeartbeat: s.lastHeartbeat || null,
     connectedAt: s.connectedAt || null,
     firstConnectAt: s.firstConnectAt || null,

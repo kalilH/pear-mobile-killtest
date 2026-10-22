@@ -8,12 +8,6 @@
     "plugins": [
       ["pear-runtime-react-native"],
       [
-        "expo-audio",
-        {
-          "enableBackgroundPlayback": true
-        }
-      ],
-      [
         "expo-build-properties",
         {
           "android": {
@@ -32,7 +26,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.hello-pear-react-native"
+      "bundleIdentifier": "com.anonymous.hello-pear-react-native",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "RawDrop needs access to your local network to stream original 4K photos and files directly to your PC at maximum wire speed without using cellular data."
+      }
     },
     "android": {
       "adaptiveIcon": {

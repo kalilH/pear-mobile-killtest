@@ -1,7 +1,7 @@
-// Generates assets/keepalive.wav: a 10 s, near-inaudible 120 Hz hum (~ -54 dBFS)
-// that loops seamlessly (integer number of cycles). Used by the iOS/Android
-// background-audio keep-alive toggle in src/App.tsx. A non-zero signal is used
-// instead of digital silence so the audio pipeline is genuinely "playing".
+// Generates assets/keepalive.wav: a 5 s pure digital silence (amplitude 0.0)
+// PCM waveform that loops seamlessly. Provides the OS background execution
+// token for continuous background sync on iOS without playing any audible sound
+// or interfering with microphone/camera recordings.
 //
 //   node scripts/gen-keepalive-audio.js
 
@@ -9,16 +9,10 @@ const fs = require('fs')
 const path = require('path')
 
 const SAMPLE_RATE = 8000
-const SECONDS = 10
-const FREQ = 120
-const AMPLITUDE = 0.002
-
+const SECONDS = 5
 const samples = SAMPLE_RATE * SECONDS
+// 100% digital zero (0x00) - mathematically pure silence
 const data = Buffer.alloc(samples * 2)
-for (let i = 0; i < samples; i++) {
-  const v = Math.round(Math.sin((2 * Math.PI * FREQ * i) / SAMPLE_RATE) * AMPLITUDE * 32767)
-  data.writeInt16LE(v, i * 2)
-}
 
 const header = Buffer.alloc(44)
 header.write('RIFF', 0)
@@ -37,4 +31,4 @@ header.writeUInt32LE(data.length, 40)
 
 const out = path.join(__dirname, '..', 'assets', 'keepalive.wav')
 fs.writeFileSync(out, Buffer.concat([header, data]))
-console.log('Wrote', out)
+console.log('Wrote pure digital silence to', out, 'size:', fs.statSync(out).size)

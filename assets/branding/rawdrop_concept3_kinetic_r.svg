@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="r-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#12131A" />
+      <stop offset="100%" stop-color="#07080B" />
+    </linearGradient>
+
+    <linearGradient id="r-stem" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3C4050" />
+      <stop offset="100%" stop-color="#1E2028" />
+    </linearGradient>
+
+    <linearGradient id="r-kinetic" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F2FE" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+  </defs>
+
+  <!-- iOS Squircle Background -->
+  <rect width="512" height="512" rx="115" fill="url(#r-bg)" stroke="rgba(255,255,255,0.12)" stroke-width="2" />
+
+  <!-- Vertical Backbone Stem (Titanium Pillar) -->
+  <path d="M 162,110 L 162,402" stroke="url(#r-stem)" stroke-width="48" stroke-linecap="round" />
+
+  <!-- Upper Ribbon Orbital Loop -->
+  <path d="M 162,136 C 248,136 334,144 334,212 C 334,272 248,282 162,282" fill="none" stroke="url(#r-stem)" stroke-width="48" stroke-linecap="round" />
+
+  <!-- Dynamic Diagonal Release Vector -->
+  <path d="M 230,274 L 334,394" stroke="url(#r-kinetic)" stroke-width="48" stroke-linecap="round" />
+
+  <!-- High-Precision Core Centerline -->
+  <path d="M 230,274 L 334,394" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.85" />
+  <circle cx="334" cy="394" r="11" fill="#FFFFFF" />
+</svg>

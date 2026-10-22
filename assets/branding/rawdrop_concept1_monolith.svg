@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Squircle Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141720" />
+      <stop offset="100%" stop-color="#08090C" />
+    </linearGradient>
+
+    <!-- Titanium Facet Gradient -->
+    <linearGradient id="facet-titanium" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3A3E4D" />
+      <stop offset="100%" stop-color="#1E2028" />
+    </linearGradient>
+
+    <!-- Laser Core Gradient -->
+    <linearGradient id="laser-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="50%" stop-color="#00F2FE" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+
+    <filter id="core-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="24" flood-color="#00F2FE" flood-opacity="0.3" />
+    </filter>
+  </defs>
+
+  <!-- iOS Squircle Background -->
+  <rect width="512" height="512" rx="115" fill="url(#bg-grad)" stroke="rgba(255,255,255,0.12)" stroke-width="2" />
+
+  <!-- Monolith Wing A (Left Architectural Titanium) -->
+  <polygon points="144,110 256,180 256,368 144,300" fill="url(#facet-titanium)" stroke="rgba(255,255,255,0.22)" stroke-width="3" />
+
+  <!-- Monolith Wing B (Right Obsidian Shadow) -->
+  <polygon points="368,110 256,180 256,368 368,300" fill="#0C0E14" stroke="rgba(255,255,255,0.08)" stroke-width="3" />
+
+  <!-- Downward Data Conduit / Inverted Apex -->
+  <polygon points="256,192 256,400 205,360" fill="url(#laser-cyan)" filter="url(#core-glow)" />
+  <polygon points="256,192 307,360 256,400" fill="#0284C7" opacity="0.8" />
+
+  <!-- Razor Micro-Seam -->
+  <line x1="256" y1="180" x2="256,400" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" />
+  <circle cx="256" cy="400" r="6" fill="#FFFFFF" />
+</svg>

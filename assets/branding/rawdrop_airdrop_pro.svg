@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Deep Space Black with subtle midnight vignette -->
+    <radialGradient id="airdrop-bg" cx="50%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#0F1422" />
+      <stop offset="100%" stop-color="#05060A" />
+    </radialGradient>
+
+    <!-- Apple Electric Cyan Gradient -->
+    <linearGradient id="wave-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#00F2FE" />
+    </linearGradient>
+
+    <filter id="soft-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#00F2FE" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- iOS Squircle Frame -->
+  <rect width="512" height="512" rx="115" fill="url(#airdrop-bg)" stroke="rgba(255,255,255,0.12)" stroke-width="2" />
+
+  <!-- Central Emitter Node -->
+  <circle cx="256" cy="238" r="18" fill="url(#wave-cyan)" filter="url(#soft-glow)" />
+
+  <!-- Concentric Radar Wave 1 (Inner) -->
+  <path d="M 298 280 A 60 60 0 1 0 214 280" fill="none" stroke="url(#wave-cyan)" stroke-width="18" stroke-linecap="round" />
+
+  <!-- Concentric Radar Wave 2 (Middle) -->
+  <path d="M 334 316 A 110 110 0 1 0 178 316" fill="none" stroke="url(#wave-cyan)" stroke-width="18" stroke-linecap="round" opacity="0.85" />
+
+  <!-- Concentric Radar Wave 3 (Outer) -->
+  <path d="M 370 352 A 160 160 0 1 0 142 352" fill="none" stroke="url(#wave-cyan)" stroke-width="18" stroke-linecap="round" opacity="0.65" />
+</svg>

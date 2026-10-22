@@ -2,7 +2,7 @@
   "name": "hello-pear-react-native",
   "productName": "HelloPear",
   "version": "1.0.0",
-  "upgrade": "pear://<YOUR_KEY_HERE>",
+  "upgrade": "pear://qt8z8mrmqamcmqke9sjmsb7nk737rao4bcocgmwgy5hxeb1y7sqy",
   "main": "index.ts",
   "scripts": {
     "bundle:bare": "npx bare-pack --host ios-arm64 --host ios-arm64-simulator --host ios-x64-simulator --host android-arm64 --linked --out ./src/worker.bundle.js ./workers/main.js",
